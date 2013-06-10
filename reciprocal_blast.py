@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-# Author: Sefa Kilic
-# Modifications: PON
 """
 This module contains functions for common tasks related to the
 analysis of homologous coding sequences through reciprocal BLAST.
@@ -86,7 +84,7 @@ annotation for each locus tag in the clique.
 
 Finally, the results are stored with:
 
-cliques2csv(cliques,orgs,named_ltds,clique_dict,filename)
+cliques2csv(cliques,orgs,named_ltds,clique_dict,filename,index)
 
 which represents the cliques in a tab-separated file.  A typical line
 of this file consists of:
@@ -114,6 +112,7 @@ from orgs import *
 from utils import *
 from biochem import *
 import tai
+import cog
 
 from collections import Counter, defaultdict
 from string import Template
@@ -125,7 +124,7 @@ BLAST_BIN_PATH = "/home/poneill/ncbi-blast-2.2.26+/bin/"
 DB_PATH = 'blastdb'
 SITE_LENGTH = 82
 ORG_PATH = "data"
-
+epsilon = 10**-10
 
 def org2nc_id(org):
     """Get NCid associated with org"""
@@ -252,12 +251,13 @@ def collate_reciprocal_blasts(orgs):
     out_path = lambda f: os.path.join("reciprocal_results", f)
     locus_tag_dicts = {}
     dir_contents = os.listdir('reciprocal_results')
-    for i, org1 in enumerate(orgs):
-        for org2 in orgs[i+1:]:
+    n = len(orgs)
+    total = n * (n - 1)/2
+    for i, (org1,org2) in enumerate(choose2(orgs)): 
             out_filename = "reciprocals_%s_%s.csv" % (org1, org2)
             out_file = out_path(out_filename)
             if out_filename in dir_contents:
-                print "found file, moving on"
+                print "found %s, moving on" % out_filename
                 continue
             print "collating recips for %s,%s at %s" % (org1, org2, time.ctime())
             if not org1 in locus_tag_dicts:
@@ -274,7 +274,7 @@ def collate_reciprocal_blasts(orgs):
             hits2 = parse_results(filename2, org2_ltd, org1_ltd)
             print "finding reciprocals"
             reciprocals = find_reciprocals(hits1, hits2)
-            print "writing"
+            print "writing file %s out of %s" % (i,total)
             with open(out_file, 'w') as f:
                 text = "\n".join(["\t".join(tup) for tup in reciprocals]) + "\n"
                 f.write(text)
@@ -378,6 +378,7 @@ def load_reciprocals(orgs):
     all_results = {}
     for org1,org2 in choose2(orgs):
         #for filename in dir_contents:
+        print org1,org2
         try:
             results = get(org1,org2)
         except IOError:
@@ -441,32 +442,10 @@ def analyze_cliques(cliques, orgs, anno_dict, named_ltds):
 def get_cdss(genome):
     return ([feature for feature in genome.features if feature.type == 'CDS'])
 
-memoize_cdss_from_org = True
-cdss = {}
 def cdss_from_org(org):
-    if not org in cdss:
-        cdss[org] = get_cdss(get_genome(org))
-    return cdss[org]
+        return get_cdss(get_genome(org))
+    
         
-def analyze_cliques2(cliques, orgs): # deprecated
-    clique_dict = {i:[] for i, cl in enumerate(cliques)}
-    for n, org in enumerate(orgs):
-        print n, org
-#        genome = SeqIO.read(get_genome_filename(org,"gbk"), 'genbank')
-        genome = get_genome(org)
-        print "computing cdss"
-        CDSs = get_cdss(genome)
-        print "searching cdss"
-        for cds in CDSs:
-#            print cds.qualifiers['locus_tag']
-            for i, cl in enumerate(cliques):
-                for locus_tag in cl:
-                    if locus_tag in cds.qualifiers['locus_tag']:
-                        clique_dict[i].append(head(cds.qualifiers['product']))
-                        #print "found cds"
-                        break
-    return clique_dict
-
 def maj_annotation(annotations):
     """Given a list of annotations (i.e. clique_dict[i]), return the
     most common"""
@@ -475,29 +454,11 @@ def maj_annotation(annotations):
 def find_full_cliques(G, orgs):
     return [cl for cl in nx.find_cliques(G) if len(cl) == len(orgs)]
 
+def find_specific_cliques(G, orgs,named_ltds):
+    return [cl for cl in nx.find_cliques(G) if clique_in_orgs(cl)]
+
 def locus_tag_prefix(tag):
     return re.match("[A-Za-z]+", tag).group()
-
-def cliques2csv2(cliques, orgs, named_ltds, clique_dict, filename): #deprecated
-    sorted_tags = sort_on(cliques[0], orgs, 
-                          lambda tag: locus_tag2org(tag, named_ltds))
-    row_header = map(locus_tag_prefix, sorted_tags)
-    indices = index_dicts(orgs,index)
-    sorted_cliques = [sort_on(clique, row_header, locus_tag_prefix)
-                      for clique in cliques]
-    rows = [zipWith(lambda tag, org:(tag, indices[org][tag]), sc, orgs)
-            for sc in sorted_cliques]
-    annotations = [maj_annotation(clique_dict[i]) for i in range(len(cliques))]
-    formatted_indices = ["\t".join(map(str, sum(row, ()))) for row in rows]
-    formatted_rows = "\n".join(zipWith(lambda row, anno: row + '\t' + anno, 
-                                       formatted_indices, annotations))
-    formatted_header = ("\t".join(sum(zip(orgs, 
-                                        ["" for i in range(len(orgs))]), ())) +
-                        "\tAnnotation\n")
-    with open(filename, 'w') as f:
-        f.write(formatted_header)
-        f.write(formatted_rows)
-
 
 def locus_tag_prefixes(org, named_ltds):
     return set(locus_tag_prefix(tag) for tag in named_ltds[org].itervalues())
@@ -547,23 +508,8 @@ def generate_pairwise_spreadsheets(orgs, named_ltds, anno_dict):
         print "making clique_dict"
         clique_dict = analyze_cliques(cliques, pair, anno_dict, named_ltds)
         print "writing csv"
-        cliques2csv(cliques, pair, named_ltds, clique_dict, full_path)
+        cliques2csv(cliques, pair, named_ltds, clique_dict, full_path,"nRCA")
 
-def generate_pairwise_spreadsheets2(orgs, named_ltds, anno_dict):#deprecated
-    for org1, org2 in choose2(orgs):
-        print "starting", org1, org2
-        pair = [org1, org2]
-        print "making graph"
-        g = make_graph(load_reciprocals(pair))
-        print "finding cliques"
-        cliques = find_full_cliques(g, pair)
-        print "making clique_dict"
-        clique_dict = analyze_cliques2(cliques, pair)
-        filename = "pairwise_correlations_%s_%s2.csv" % (org1, org2)
-        print "writing csv"
-        cliques2csv(cliques, pair, named_ltds, clique_dict, filename)
-
-    
 def read_genome_info_txt(filename):
     lines = open(filename).readlines()
     return [line.split("\t") for line in lines]
@@ -573,22 +519,18 @@ def find_indices_over_cliques(genome_info, cliques):
             for line in genome_info if line[1] in clique]
 
 def nc_template(index):
-    "%s-1.0_rcc_RCA" if index == "RCA" else "%s-1.0-tAI"
+    return "%s-1.0_rcc_RCA" if index in ["nRCA","RCA"]  else "%s-1.0-tAI"
     
 def correlate_index_over_cliques(cliques, orgs,index):
     """Return a list of lists containing, for each organism, the index value of
     that organism's contribution to each clique"""
-    NCids = [org2nc_id(org) for org in orgs]
-    
-    dirs = [nc_template % nc for nc in NCids]
-    genome_info_filenames = [os.path.join('index_results', d, 'genome_info.txt')
-                             for d in dirs]
+    genome_info_filenames = [genome_info_filename(org,index) for org in orgs]
     return [find_indices_over_cliques(read_genome_info_txt(gif), cliques)
-            for gif in genome_info_filenames]
+            for gif in verbose_gen(genome_info_filenames)]
 
 def genome_info_filename(org,index):
     "return the filepath for genome_info.txt belonging to org"
-    if index == "RCA" or index == "CAI":
+    if index in ["nRCA","RCA,""CAI"]:
         d = "%s-1.0_rcc_%s" % (org2nc_id(org), index)
     else:
         d = "%s-%s" % (org2nc_id(org), index)
@@ -596,6 +538,7 @@ def genome_info_filename(org,index):
     
 def index_dict(org,index):
     """return a dictionary of the form {locus_tag:index} over org"""
+    print org
     genome_info = read_genome_info_txt(genome_info_filename(org,index))
     return {row[1]:float(row[0]) for row in genome_info}
 
@@ -615,11 +558,10 @@ def check_correlation_in_pairwise_cliques():
         results.append((f, scipy.stats.pearsonr(xs, ys)))
     return sorted(results, key=lambda result: result[1][0], reverse=True)
 
-conditional_log_trasnform=True
+conditional_log_transform=True
 def exp_dict(filename):
 #    print filename
-    conditional_log_transform = False
-    MAX_LOG_VALUE = 100
+    MAX_LOG_VALUE = 1000000
     lines = [line for line in csv.reader(open(filename), delimiter=',')]
     d = {}
     for line in lines:
@@ -640,6 +582,16 @@ def exp_dict(filename):
             d = {k:map(safe_log,d[k]) for k in d}
     return d
 
+def exp_dicts(orgs):
+    dicts = {}
+    for org in orgs:
+        try:
+            dicts[org] = exp_dict(exp_filename(org))
+            print "exp data for:",org
+        except:
+            print "no exp data for:",org
+            continue
+    return dicts
 
 def pairwise_correlations(org1, org2):
     dirname = os.path.join("clique_csvs", "pairwise_correlations")
@@ -660,6 +612,74 @@ def pairwise_correlations(org1, org2):
                   for line in lines[1:]]
     return pairs
 
+def pairwise_correlation_with_uniform_sampling(org1,org2):
+    """The purpose of this function is to compute the correlation
+    between the the nRCA values of org1, org2 while correcting for
+    density.  That is, we wish to refute the charge that the observed
+    correlation between the two sets of nRCA values is due only to
+    clustering at the top and bottom.  To that end, we will compute
+    the correlation after resampling uniformly from the space."""
+    corrs = pairwise_correlations(org1,org2)
+    xs,ys = transpose([(cor[1],cor[3]) for cor in corrs])
+    xmin,xmax = min(xs),max(xs)
+    ymin,ymax = min(ys),max(ys)
+    n = len(corrs)
+    x_rs = [random.random() * (xmax-xmin) + xmin for _ in xrange(n/2)]
+    y_rs = [random.random() * (ymax-ymin) + ymin for _ in xrange(n/2)]
+    x_indices = [argmax(map(lambda x:x if x<x_r else -1,xs)) for x_r in x_rs]
+    y_indices = [argmax(map(lambda y:y if y<y_r else -1,ys)) for y_r in y_rs]
+    indices = x_indices + y_indices
+    xs_resampled = rslice(xs,indices)
+    ys_resampled = rslice(ys,indices)
+    return spearman(xs_resampled,ys_resampled)
+
+def pairwise_correlation_with_sliding_window(org1,org2):
+    """The previous experiment
+    (pairwise_correlation_with_uniform_sampling) actually exacerbated
+    the representation of ribosomal proteins (since ribosomals are
+    sparse in the range [.5,.7]).  Instead, we'll compute correlations
+    separately over 10 bins and average them."""
+    corrs = pairwise_correlations(org1,org2)
+    xs,ys = transpose([(cor[1],cor[3]) for cor in corrs])
+    xmin,xmax = min(xs),max(xs)
+    ymin,ymax = min(ys),max(ys)
+    n = len(corrs)
+    js = sorted_indices(xs)
+    return [spearman(rslice(xs,jth_bin),rslice(ys,jth_bin))
+            for jth_bin in sliding_window(js,n/2)]
+
+def make_ribbon_graph(filename=None):
+    """Construct the 'ribbon graph' obtained by plotting the
+    pairwise_correlation_with_sliding_window for all pairs in
+    last_orgs.  Color the plot according to whether pair belongs to
+    same group or not."""
+    swss = [pairwise_correlation_with_binning(org1,org2)
+            for org1,org2 in verbose_gen(choose2(last_orgs))]
+    plotted_ingroup_yet = plotted_outgroup_yet = False
+    for sws,(org1,org2) in zip(swss,choose2(last_orgs)):
+        in_group = org_group(org1) == org_group(org2)
+        col = color='green' if in_group else 'red'
+        label = "In-group" if in_group else "Out-group"
+        midpoints = [i/(2*float(len(sws))) + 0.25
+                        for (i,v) in enumerate(sws)]
+        if in_group and not plotted_ingroup_yet:
+            plt.plot(midpoints,sws,color=col,label=label)
+            plotted_ingroup_yet = True
+        elif not in_group and not plotted_outgroup_yet:
+            plt.plot(midpoints,sws,color=col,label=label)
+            plotted_outgroup_yet = True
+        else:
+            plt.plot(midpoints,sws,color=col)
+    plt.xlabel("Midpoint Percentile")
+    plt.ylabel(r"Spearman $\rho$")
+    plt.legend(loc=0)
+    plt.title("Sliding Window Spearman Correlation")
+    if filename:
+        plt.savefig(filename,dpi=400)
+        
+    
+    
+    
 def exp_filename(org):
     return os.path.join("exp_csvs", org+"_exp.csv")
     
@@ -850,11 +870,11 @@ def test_gc(k, n):
 
 def parse_iterations_verbose(org):
     """parse iterationsVerbose.txt for org and return three
-    dictionaries, the first of the form {codon:genome-wide codon
-    freq}, the second of the form {codon:refset codon freq}, and
+    dictionaries, the first of the form {codon:genome_wide_codon
+    freq}, the second of the form {codon:refset_codon_freq}, and
     the third of the form {codon:w-value}"""
     ncid = org2nc_id(org)
-    filename = os.path.join("index_results", ncid+"-1.0_rcc_RCA", 
+    filename = os.path.join("index_results", ncid+"-1.0_rcc_nRCA", 
                             "iterationVerbose.txt")
     with open(filename) as f:
         lines = [filter(iota, line) for line in csv.reader(f, delimiter="\t")]
@@ -871,6 +891,107 @@ def parse_iterations_verbose(org):
         return d
     results = map(lines2dict, [genomic_freq_lines, refset_freq_lines, w_lines])
     return results
+
+def gc_content(seq):
+    return len([n for n in seq if n in "gcGC"])/float(len(seq))
+
+def codon_dict2gc(refset_freqs):
+    return sum([gc_content(codon) * refset_freqs[codon] for codon in refset_freqs])
+        
+def org2refset_codons(org):
+    refset = 1
+    return parse_iterations_verbose(org)[refset]
+
+def org2genomic_codons(org):
+    genomic = 0
+    return parse_iterations_verbose(org)[genomic]
+
+def org2w_codons(org):
+    w = 2
+    return parse_iterations_verbose(org)[w]
+
+def org2refset_enrichment(org):
+    epsilon = 10**-10
+    org_refset_codons = org2refset_codons(org)
+    org_genomic_codons = org2genomic_codons(org)
+    return {codon:org_refset_codons[codon]/(org_genomic_codons[codon] + epsilon)
+            for codon in codons}
+    
+def extract_boxes(codon_dict,box_length,break_down_six_boxes = False):
+    tt = translation_table if not break_down_six_boxes else six_box_translation_table
+    n_box_aas = [aa for aa in tt if len(tt[aa]) == box_length]
+    n_box_codons = concat(map(lambda codon: tt[codon],n_box_aas))
+    n_box_dict = {codon:codon_dict[codon] for codon in codon_dict
+                     if codon in n_box_codons}
+    return n_box_dict
+
+
+def separate_nbox_into_t_ending(n_box_dict,break_down_six_boxes,n):
+    """Given a dictionary of n_box codons (see
+    extract_boxes),return a dictionary giving frequency of t_ending
+    codons, non_t_ending codons.  Format: {amino
+    acid:(t_ending_freq,non_t_ending_freq)}"""
+    tt = translation_table if not break_down_six_boxes else six_box_translation_table
+    def freq_tuple(aa):
+        codons = tt[aa]
+        t_ending_freqs = [n_box_dict[codon] for codon in codons
+                          if codon.endswith('t')]
+        non_t_ending_freqs = [n_box_dict[codon] for codon in codons
+                               if not codon.endswith('t')]
+        return (t_ending_freqs,non_t_ending_freqs)
+    return {aa:freq_tuple(aa) for aa in tt
+            if len(tt[aa]) == n}
+
+def n_box_dict_separated(orgs,break_down_six_boxes,n):
+    """Given a list of orgs, return a dictionary of the form:
+    {org:{aa:([t_ending_frequency],[non_t_ending_frequencies])}}"""
+    n_box_dict = {org:extract_boxes(org2refset_enrichment(org),n,break_down_six_boxes) for org in orgs}
+    fbd_separated = {org:separate_nbox_into_t_ending(n_box_dict[org],break_down_six_boxes,n) for org in orgs}
+    return fbd_separated
+    
+def n_box_dict_separated2csv(n_box_dict_separated,filename):
+    two_boxing = len(n_box_dict_separated.values()[0].values())
+    aas = head(n_box_dict_separated.values()).keys()
+    break_down_six_boxes = True if len(aas) in [8,11] else False
+    tt = translation_table if not break_down_six_boxes else six_box_translation_table
+    first_header = "," + ''.join(["%s,,,," % aa for aa in aas])
+    def second_header_for_aa(aa):
+        codons = tt[aa]
+        t_ending_codon = [codon for codon in codons
+                          if codon.endswith('t')]
+        non_t_ending_codon = [codon for codon in codons
+                              if not codon.endswith('t')]
+        return ",".join(t_ending_codon + non_t_ending_codon)
+    second_header = "," + ",".join([second_header_for_aa(aa) for aa in aas])
+    rows = "\n".join([",".join([org] + map(str,concat([concat(n_box_dict_separated[org][aa])
+                            for aa in n_box_dict_separated[org]])))
+            for org in n_box_dict_separated])
+    with open(filename,'w') as f:
+        f.write(first_header + "\n")
+        f.write(second_header + "\n")
+        f.write(rows + "\n")
+        
+
+def generate_refset_gc_content(group_name):
+    orgs = eval(group_name)
+    genomic = 0
+    refset = 1
+    gc_contents = [codon_dict2gc(parse_iterations_verbose(org)[refset]) for org in orgs]
+    gc_contents_pseudos = [codon_dict2gc(parse_iterations_verbose(org)[refset]) for org in pseudos]
+    gc_contents_psychros = [codon_dict2gc(parse_iterations_verbose(org)[refset]) for org in psychros]
+    group_mean = mean(gc_contents)
+    group_sd = sd(gc_contents)
+    group_mean_psychros = mean(gc_contents_psychros)
+    group_sd_psychros = sd(gc_contents_psychros)
+    group_mean_pseudos = mean(gc_contents_pseudos)
+    group_sd_pseudos = sd(gc_contents_pseudos)
+    data2csv([gc_contents,["group mean",group_mean],["group sd",group_sd],
+              ["group mean (pseudos)",group_mean_pseudos],
+              ["group sd (pseudos)",group_sd_pseudos],
+              ["group mean (psychros)",group_mean_psychros],
+              ["group sd (psychros)",group_sd_psychros]],
+             filename="refset_gcs/refset_gc_content_%s.csv" % group_name,header=orgs)
+
 
 def all_pairwise_indices(orgs):
     return sorted([(all_correlations(org1, org2)[0], org1, org2)
@@ -889,13 +1010,29 @@ def genomic_codon_freqs(org):
 def refset_codon_freqs(org):
     return parse_iterations_verbose(org)[1]
 
+# def genomic_codon_counts(org):
+#     genome = get_genome(org)
+#     genomic_cdss = cdss_from_org(org)
+#     counts = defaultdict(int)
+#     for cds in genomic_cdss:
+#         for codon in group_codons
+
+def trna_codon_freqs(org):
+    trnas = trna_counts(org)
+    total = float(sum(trnas.values()))
+    return {codon:(trnas[codon]/total if codon in trnas else 0)
+            for codon in codons}
+
+def trna_counts(org):
+    return parse_trnas(org2trna_filename(org))
+            
 def all_correlations(org1, org2, n=None,correlation_func=pearson):
     """Compare the correlation between index values to the correlation
     between RCA weights"""
 #    genome1, genome2 = map(get_genome, [org1, org2])
 #    cdss1, cdss2 = map(get_cdss, [genome1, genome2])
 #    cdss1, cdss2 = map(cdss_from_org, [org1,org2])
-    index_dict1, index_dict2 = map(index_dict, [org1, org2])
+    index_dict1, index_dict2 = map(lambda org:index_dict(org,"nRCA"), [org1, org2])
     correlations = pairwise_correlations(org1, org2)[:n]
     index_table1 = [index_dict1[line[0]] for line in correlations]
     index_table2 = [index_dict2[line[2]] for line in correlations]
@@ -912,7 +1049,7 @@ def all_correlations(org1, org2, n=None,correlation_func=pearson):
                                     (refset_codon_table1, refset_codon_table2),
                                     (w_table1, w_table2)])
     index_corr, gen_codon_corr, refset_codon_corr, w_corr = results
-    return (index_corr, gen_codon_corr, refset_codon_corr, w_corr)
+    return (org1,org_group(org1),org2,org_group(org2),index_corr, gen_codon_corr, refset_codon_corr, w_corr)
 
 def all_correlations_all_orgs(orgs,cf=pearson):
     d = all_correlations_all_orgs_dict(orgs,cf)
@@ -938,13 +1075,13 @@ def init_analysis_summary(orgs, outfile="initial_analysis_summary.csv"):
               "RCA Ribosomal Crit, RCA Strength Crit, RCA Content Crit, "
               + "CAI Ribosomal Crit, CAI Strength Crit, CAI Content Crit")
     lines = [", ".join(map(str, (org, ) +
-              parse_ribo_str_crit(get_file(org, "RCA")) +
+              parse_ribo_str_crit(get_file(org, "nRCA")) +
               parse_ribo_str_crit(get_file(org, "CAI")))) for org in orgs]
     with open(outfile, 'w') as f:
         f.write(header)
         f.write("\n".join(lines))
 
-def pairwise_summary(orgs, outfile, f=pearson):
+def pairwise_summary(orgs, outfile, f=spearman):
     """Summarize the pairwise_correlation files by providing csv
     tables that report the Pearson and Spearman correlations, and
     number of genes, in each pairwise_correlation file. """
@@ -1017,21 +1154,36 @@ def trna_dict2trna_list(trna_dict,codon_order = "lexicographic"):
     cs = lookup[codon_order]
     return [trna_dict[c] for c in cs]
 
-def write_tai_data_for_R_script(org):
+def write_tai_data_for_R_script(org,overwrite=False):
     print org
     w_list = w_list_for_R_script(org)
     orf_freqs = orf_frequencies_for_R_script(org)
-    data2csv([w_list],os.path.join("tai_script",org+"_ws.csv"))
-    data2csv(orf_freqs,os.path.join("tai_script",org+"_orf_freqs.csv"))
+    data2csv([w_list],os.path.join("tai_script",org+"_ws.csv"),overwrite=overwrite)
+    data2csv(orf_freqs,os.path.join("tai_script",org+"_orf_freqs.csv"),
+             overwrite=overwrite)
                   
 def w_list_for_R_script(org):
     return trna_dict2trna_list(genomic_codon_freqs(org),codon_order = "table")
 
+def process_output_for_R_script(org,anno_dict,overwrite=False):
+    print(org)
+    with open(os.path.join("tai_script",org+"_tais.csv")) as f:
+        lines = [line for line in csv.reader(f)][1:]
+    tais = [float(head(line)) for line in lines]
+    org_locus_tags = locus_tags(org)
+    annos = [anno_dict[org][tag] for tag in org_locus_tags]
+    genome_info = transpose([tais,org_locus_tags,annos])
+    dirname = org2nc_id(org)+"-tAI"
+    if not dirname in os.listdir('index_results'):
+        os.mkdir(os.path.join("index_results",dirname))
+    filename = os.path.join("index_results",dirname,"genome_info.txt")
+    data2csv(genome_info,filename=filename,sep="\t",overwrite=overwrite)
+    
 def orf_frequencies_for_R_script(org):
     sequences = coding_sequences(org)
     m = []
     for sequence in verbose_gen(sequences):
-        m.append(trna_dict2trna_list(Counter(group_codons(sequence)),
+        m.append(trna_dict2trna_list(Counter(group_codons(str(sequence.seq))),
                                      codon_order="table"))
     return m
     
@@ -1079,24 +1231,30 @@ def coding_sequences(org):
         print "found gbk"
         genome = get_genome(org)
         cdss = get_cdss(genome)
-    return [str(cds.extract(genome).seq).lower() for cds in verbose_gen(cdss)]
+        return [str(cds.extract(genome).seq).lower() for cds in verbose_gen(cdss)]
+
+def coding_sequences_dict(org):
+    genome = get_genome(org)
+    cdss = get_cdss(genome)
+    return {head(cds.qualifiers['locus_tag']):str(cds.extract(genome).seq).lower()
+                    for cds in verbose_gen(cdss)}
+
+def locus_tags(org):
+    "Return a list of coding sequences in the order encountered in gbk file"
+    genome = get_genome(org)
+    cdss = get_cdss(genome)
+    return [head(cds.qualifiers['locus_tag']) for cds in cdss]
 
 def codon_usage(genome):
     codons = defaultdict(int)
     cdss = get_cdss(genome)
-    old_objects = len(gc.get_objects())
     for cds in verbose_gen(cdss):
 #        print "extracting"
 #        seq = cds.extract(genome)
         seq = my_extract(cds,genome)
 #       print "finished extracting"
-        current_objects = len(gc.get_objects())
-        new_objects = current_objects - old_objects
         for codon in group_codons(seq):
             codons[codon] += 1
-        print "This: %d, New: %d, Garbage: %d, Collection Counts: %s"\
-            % (current_objects, new_objects, len(gc.garbage), gc.get_count())
-        old_objects = current_objects
     return codons
 
 def codon_trna_correlation(codon_dicts,trna_dicts):
@@ -1135,31 +1293,37 @@ def codon_behavior(gen_codon_dicts,refset_codon_dicts,trna_dicts):
 
 def generate_correlations(): 
     def write_correlations(org_name,method):
+        filename = "nrca_freq_correlations/%s_%s_correlations.csv" % (org_name,method.func_name)
+        print filename
+        if filename in os.listdir("nrca_freq_correlations"):
+            print "found ",filename
+            return
         return data2csv(all_correlations_all_orgs(eval(org_name),method),
-                        "%s_%s_correlations.csv" % (org_name,method.func_name),
-                        header=["indices","genfreqs","refsetfreqs","ws"])
-    # org_names = ["all_orgs","actinos","firmicutes","gammas","pseudos",
-    #              "psychros","pvp_orgs"]
-    org_names = ["pseudos","psychros"]
-    methods = [pearson,spearman,l2]
+                        filename,
+                        header=["org1","org1_group","org2","org2_group","nRCAs","genfreqs","refsetfreqs","ws"])
+    org_names = ["last_orgs","all_orgs","actinos","firmicutes","gammas","pseudos",
+                 "psychros","pvp_orgs","enteros"]
+#    org_names = ["pseudos","psychros"]
+    methods = [spearman] #[pearson,spearman,l2]
     for org_name,method in cart_product(org_names,methods):
         write_correlations(org_name,method)
 
-def normalize_codon_dict(d):
+def normalize_codon_dict(d,break_down_six_boxes):
     """Take a dictionary of the form {codon:numeric_val} and return a
     dictionary normalized by amino acid bias"""
-    print "hello"
     d_copy = d.copy()
+    break_down_six_boxes = any("2" in codon or "4" in codon for codon in d)
     def normalization(codon):
         print codon
-        denom = float(sum([d_copy[c] for c in synonymous_codons(codon)
+        denom = float(sum([d_copy[c]
+                           for c in synonymous_codons(codon,break_down_six_boxes)
                            if c in d_copy]))
         return denom if denom else 1
     print "defined"
     return defaultdict(int,{codon:d[codon]/normalization(codon) for codon in d})
     
-def write_codon_trna_spreadsheet(filename):
-    tt = translation_table
+def write_codon_trna_spreadsheet(filename,six_box=False):
+    tt = translation_table if not six_box else six_box_translation_table
     sorted_codons = [codon for aa in tt for codon in tt[aa]]
     print "trna_dicts"
     trna_dicts = map_over_vals(normalize_codon_dict,get_trna_dicts(pvp_orgs))
@@ -1247,6 +1411,7 @@ def codon_trna_barchart(filename):
     pylab.show()
 
 def run_tai(orgs):
+    """Make tai folders in index_results"""
     print "trna dicts"
     trna_dicts = get_trna_dicts(orgs)
     print "sorting"
@@ -1277,15 +1442,15 @@ def run_tai(orgs):
             tai_value = org_tai.tai(sequence)
             lines.append([tai_value,locus_tag,description])
             print locus_tag
-        data2csv(lines,os.path.join(dirname,filename))
-        
+        data2csv(lines,os.path.join(dirname,filename),sep="\t")
+
 def refset_info(org,index):
     nc = org2nc_id(org)
     dirname = nc + "-1.0_rcc_%s" % index
     full_path = os.path.join("index_results",dirname,"refset_info.txt")
     with open (full_path) as f:
         lines = [line for line in csv.reader(f,delimiter="\t")]
-    return [(line[1],line[4]) for line in lines]
+    return lines
 
 def top_scoring_annotations(org,index,n):
     nc = org2nc_id(org)
@@ -1295,23 +1460,558 @@ def top_scoring_annotations(org,index,n):
         lines = [line for line in csv.reader(f,delimiter="\t")]
     return [line[5] for line in lines][:n]
 
-def refset_annotations(org,index):
-    return [line[-1] for line in refset_info(org,index)]
-        
-def refset_summary(orgs,filename):
+def refset_tags(org,index):
+    return [line[0] for line in refset_info(org,index)]
+
+def cliques_in_refsets(orgs,all_results,anno_dict,named_ltds):
+    print "loading reciprocals"
+    print "making graph"
+    g = make_graph(all_results)
+    print "finding cliques"
+    cliques_of_length = lambda clique_size: [clique for clique in nx.find_cliques(g)
+                                             if len(clique) == clique_size]
+    "loading refset dicts"
+    refset_dicts = {org:refset_tags(org,"nRCA") for org in orgs}
+    def num_refsets(clique):
+        return sum([tag in refset_dicts[locus_tag2org(tag,named_ltds)]
+                    for tag in clique])
+    locus_tag2anno = locus_tag2anno_factory(anno_dict,named_ltds)
+    _locus_tag2org = lambda tag:locus_tag2org(tag,named_ltds)
+    header_clique = head(nx.find_cliques(g),lambda clique:len(clique)==len(orgs))
+    sorted_orgs = [locus_tag2org(tag,named_ltds) for tag in sorted(header_clique)]
+    sort_clique = lambda clique : [head(clique, lambda tag: _locus_tag2org(tag) == org)
+                                   for org in sorted_orgs]
+    return ([sorted_orgs + ["Majority Annotation","Refset Count","Clique Size"]] +
+            [(sort_clique(clique) +
+              [plurality(map(locus_tag2anno,clique))] +
+              [num_refsets(clique)] + [len(clique)])
+            for i in range(2,len(header_clique) + 1)
+             for clique in verbose_gen(cliques_of_length(i))])
+
+def generate_cliques_in_refsets_csvs():
+    for group_name in ["pseudos","psychros","pvp_orgs","gammas",
+                  "firmicutes","actinos","enteros","last_orgs"]:
+        print group_name
+        group = eval(group_name)
+        group_results = load_reciprocals(group)
+        data2csv(cliques_in_refsets(group,group_results,anno_dict,named_ltds),
+                 filename = ("clique_csvs/%s_cliques_of_all_lengths_in_refsets,csv"
+                             % group_name),
+                 sep="\t",overwrite=False)
+    
+def refset_annotations(org,index,anno_dict):
+    def locus_tag(line):
+        #This function exists to cope with trailing whitespace, which
+        #arbitrarily litters refset_info files.  OOOORRRR!
+        return line[0]
+    return [anno_dict[org][locus_tag(line)] for line in refset_info(org,index)]
+
+def get_refsets(orgs,index,anno_dict):
+    return {org:refset_annotations(org,index,anno_dict) for org in orgs}
+
+def get_refset_tags(orgs,index):
+    return {org:refset_tags(org,index) for org in orgs}
+
+def refset_words(orgs,index,anno_dict):
+    refsets = get_refsets(orgs,index,anno_dict)
+    return (sum([term.replace(","," ").split(" ")
+                         for org in orgs
+                         for term in refsets[org]],[]))
+
+def genomic_words(orgs,anno_dict):
+    return [word
+            for org in orgs
+            for annotation in (anno_dict[org].values())
+            for word in annotation.replace(","," ").split(" ")]
+
+def weighted_words(orgs,anno_dict,indices):
+    return [word
+            for org in orgs
+            for tag in anno_dict[org]
+            for word in anno_dict[org][tag].replace(","," ").split(" ")
+            if indices[org][tag] > random.random()]
+
+def print_enrichment(refset_words,genomic_words):
+    refset_counter = Counter(refset_words)
+    genomic_counter = Counter(genomic_words)
+    refset_length = len(refset_words)
+    genomic_length = len(genomic_words)
+    enrichments = {word:((refset_counter[word]/float(refset_length)) /
+                         (genomic_counter[word]/float(genomic_length)))
+                   for word in refset_counter}
+    return [(enrichments[word],refset_counter[word],genomic_counter[word],word)
+            for word in sorted(enrichments,key=lambda w:enrichments[w],reverse=True)]
+
+def write_enrichments(org_name):
+    orgs = eval(org_name)
+    data = print_enrichment(refset_words(orgs,"nRCA",anno_dict),
+                            genomic_words(orgs,anno_dict))
+    data2csv(data,"refset_annotations/%s_refset_annotations.csv" % org_name,
+             header=["Enrichment","refset_count","genomic_count","term"])
+    
+def refset_summary(orgs,anno_dict,filename,overwrite=False):
     data = []
     for org in orgs:
         data.append([org])
         data.append([])
-        for annotation in refset_annotations(org,"RCA"):
+        for annotation in refset_annotations(org,"nRCA",anno_dict):
             data.append([annotation])
-    data2csv(data,filename)
+    data2csv(data,filename,overwrite=overwrite)
 
 def top_scoring_summary(orgs,filename,n):
     data = []
     for org in orgs:
         data.append([org])
         data.append([])
-        for annotation in top_scoring_annotations(org,"RCA",n):
+        for annotation in top_scoring_annotations(org,"nRCA",n):
             data.append([annotation])
     data2csv(data,filename)
+
+def setup(orgs):
+    """Construct databases, blast and collate reciprocals for orgs"""
+    populate_dbs(orgs)
+    reciprocal_blasts2(orgs)
+    collate_reciprocal_blasts(orgs)
+
+def compute_cliques(orgs,anno_dict,named_ltds):
+    print "loading reciprocals"
+    all_results = load_reciprocals(orgs)
+    print "making graph"
+    g = make_graph(all_results)
+    print "finding cliques"
+    cliques = map(sorted,find_full_cliques(g,orgs))
+    print "analyzing cliques"
+    return cliques,analyze_cliques(cliques,orgs,anno_dict,named_ltds).values()
+
+def generate_all_full_clique_csvs():
+    for group_name in group_names:
+        cliques,_ = compute_cliques(eval(group_name),anno_dict,named_ltds)
+        data2csv(map(sorted,cliques),filename="clique_csvs_"+group_name + "_full_cliques.csv")
+
+# def ribosomal_cliques(orgs,anno_dict,named_ltds):
+#     cliques,clique_dict = compute_cliques(orgs,anno_dict,named_ltds)
+#     header_clique = head(cliques,lambda clique:len(clique)==len(orgs))
+#     sorted_orgs = [locus_tag2org(tag,named_ltds) for tag in sorted(header_clique)]
+#     return ([sorted_orgs] +
+#             [[indices[locus_tag2org(tag,named_ltds)][tag] for tag in clique]
+#              for clique in [clique for i,clique in enumerate(cliques)
+#                             if any(("ribosomal" in term
+#                                     for term in clique_dict[i]))]])
+
+def generate_ribosomal_clique_csvs():
+    for group_name in group_names:
+         filename = "clique_csvs/%s_ribosomals.csv" % group_name
+         try:
+             open(filename)
+             print "found",filename
+             continue
+         except IOError:
+             data2csv(phrase_cliques(eval(group_name),anno_dict,named_ltds,"ribosomal"),
+                      filename,
+                      sep="\t",overwrite=False)
+
+def generate_full_clique_csvs():
+    for group_name in group_names:
+         filename = "clique_csvs/%s_full_cliques.csv" % group_name
+         try:
+             open(filename)
+             print "found",filename
+             continue
+         except IOError:
+             data2csv(phrase_cliques(eval(group_name),anno_dict,named_ltds,""),
+                      filename,
+                      sep="\t",overwrite=False)
+
+def phrase_cliques(orgs,anno_dict,named_ltds,phrase):
+    cliques,clique_dict = compute_cliques(orgs,anno_dict,named_ltds)
+    header_clique = head(cliques,lambda clique:len(clique)==len(orgs))
+    sorted_orgs = [locus_tag2org(tag,named_ltds) for tag in sorted(header_clique)]
+    _locus_tag2org = lambda tag:locus_tag2org(tag,named_ltds)
+    sort_clique = lambda clique : [head(clique, lambda tag: _locus_tag2org(tag) == org)
+                                   for org in sorted_orgs]
+    return ([sorted_orgs] +
+            [[indices[locus_tag2org(tag,named_ltds)][tag]
+              for tag in sort_clique(clique)]
+             for clique in [clique
+                            for i,clique in enumerate(cliques)
+                            if any((phrase in term for term in clique_dict[i]))]])
+
+def compute_clique_crossings(cliques):
+    """Given a list of nRCA values for orthologs in a group of cliques
+    (structured as [[clique1],[clique2]...]) compute the number of
+    _crossings_, or occurences of the form nRCA(org1,clique_i) <
+    nRCA(org1,clique_j) but nRCA(org2,clique_i) < nRCA(org2,clique_j)"""
+    orgs = transpose(cliques) #[[cliques in org1],[cliques in org2]...]
+    crossings = 0
+    for org_i,org_j in choose2(orgs):
+        for x,y in choose2(range(len(org_i))):
+            if not (cmp(org_i[x],org_i[y]) == cmp(org_j[x],org_j[y])):
+                crossings += 1
+    return crossings
+
+def random_clique_matrix(num_cliques,num_orgs):
+    return [[random.random() for org in range(num_orgs)]
+            for clique in range(num_cliques)]
+
+def locus_tag2index_factory(indices,named_ltds):
+    return lambda tag: indices[locus_tag2org(tag,named_ltds)][tag]
+
+def locus_tag2exp_factory(exp_dicts,named_ltds):
+    def locus_tag2exp(tag):
+        try:
+            return exp_dicts[locus_tag2org(tag,named_ltds)][tag]
+        except:
+            return None
+    return locus_tag2exp
+
+def locus_tag2anno_factory(anno_dict,named_ltds):
+    def locus_tag2anno(tag):
+        return anno_dict[locus_tag2org(tag,named_ltds)][tag]
+    return locus_tag2anno
+
+def rca_vs_tai_comparison():
+    all_exp_dicts = exp_dicts(all_orgs)
+    
+    rca_indices = index_dicts(all_orgs,"nRCA")
+    tai_indices = index_dicts(all_orgs,"tAI")
+    for org in all_exp_dicts:
+	print org
+        # tags,rcas,tais,exps = zip(*[(tag,indices[org][tag],
+        #                              tai_indices[org][tag],
+        #                              mean(all_exp_dicts[org][tag]))
+        #                             for tag in all_exp_dicts[org]
+        #                             if (tag in indices[org] and
+        #                                 tag in tai_indices[org])])
+        
+        lines = ([(tag,indices[org][tag],
+                       tai_indices[org][tag],
+                       mean(all_exp_dicts[org][tag]))
+                      for tag in all_exp_dicts[org]
+                      if (tag in indices[org] and
+                          tag in tai_indices[org])])
+        tags,rcas,tais,exps = transpose(lines)
+        data2csv(lines,"%s_rca_vs_tai_vs_exp_comparison.csv" % org,header = ["tag","rca","tai","exp"])
+	print "rca vs exp:",spearman(rcas,exps),"tai vs exp",spearman(tais,exps)
+
+def exp_vs_exp_pvp_plot(pvp_cliques,exp_dicts,named_ltds):
+    locus_tag2exp = locus_tag2exp_factory(exp_dicts,named_ltds)
+    expressables = ["Pseudomonas_putida",
+                    "Pseudomonas_fluorescens",
+                    "Pseudomonas_aeruginosa",
+                    "Psychrobacter_arcticus_273"]
+    tags = {org:[tag for clique in pvp_cliques for tag in clique
+                 if locus_tag2org(tag,named_ltds) == org] for org in expressables}
+    def all_data_for_ith_tag(i):
+        return all ([mean(locus_tag2exp(other_tag))
+                     for other_tag in [tags[other_org][i]
+                                       for other_org in expressables]])
+    tags_with_no_missing_data = {org:[tag for (i,tag) in enumerate(tags[org])
+                                      if all_data_for_ith_tag(i)]
+                                 for org in expressables}
+    
+    exps = {org:map(lambda tag: mean(locus_tag2exp(tag)),
+                    tags_with_no_missing_data[org]) for org in expressables}
+    psych_exps = exps[expressables[3]]
+    pseudo_exps = map(mean,zip(*[exps[pseudo] for pseudo in expressables[:3]]))
+    
+def cliques_over(orgs):
+    all_results = load_reciprocals(orgs)
+    g = make_graph(all_results)
+    cliques = find_full_cliques(g,orgs)
+    return cliques
+
+def clique_annos(cliques,locus_tag2anno):
+    return [plurality(map(locus_tag2anno,clique)) for clique in cliques]
+
+def build_zero_crossings_graph():
+    pvp_orgs_full_cliques = [line for line in csv.reader(open("clique_csvs/pvp_orgs_full_cliques.csv"),delimiter="\t")]
+    pvp_orgs_full_cliques = [map(float,line) for line in pvp_orgs_full_cliques[1:]]
+    g = nx.Graph()
+    for (i,j) in choose2(range(361)):
+        line1 = pvp_orgs_full_cliques[i]
+        line2 = pvp_orgs_full_cliques[j]
+        if(reduce(lambda x,y:x==y,zipWith(lambda u,v: u < v,line1,line2))):
+            g.add_edge(i,j)
+            print i,j
+    return g
+
+def read_cliques(org_name):
+    """Read csv of clique nRCA values, a la in R"""
+    with open("clique_csvs/%s_full_cliques.csv" % org_name) as f:
+        cliques = mapmap(float,list(csv.reader(f,delimiter="\t"))[1:])
+    return cliques
+
+def distance_graph(cliques,inverse=False):
+    """Given a matrix of cliques, return a weighted graph whose nodes
+    are cliques and whose edge weights are the Euclidean distances
+    between their rows.  If inverse if false, weight=distance.  If
+    True, weight=1/distance"""
+    def distance(xs,ys):
+        return sqrt(sum(zipWith(lambda x,y: (x-y)**2,xs,ys)))
+    def cond_inv(x):
+        return 1/x if inverse else x
+    g = nx.Graph()
+    n = len(cliques)
+    for (i,j) in choose2(range(n)):
+        g.add_edge(i,j,weight=cond_inv(distance(cliques[i],cliques[j])))
+    return g
+
+def normalize_by_synonymous_codons(codon_dict):
+    def normalization(codon):
+        denom = float(sum(dictmap(codon_dict, synonymous_codons(codon,False))))
+        return 1/denom if denom else 0
+    return {codon:codon_dict[codon]*normalization(codon) for codon in codons}
+
+
+def pvp_barchart_unnormalized_by_aa(orgs,codon_set=four_box_codons,testing=False):
+    """Compute the ending position frequencies for every pvp in the
+    refset and genome, compare using MWU.
+    Wed Aug  8 14:08:53 EDT 2012 """
+    mannwhitneyu = scipy.stats.mannwhitneyu
+    pseudo_genomic = defaultdict(list)
+    pseudo_refset = defaultdict(list)
+    pseudo_trna = defaultdict(list)
+    psychro_genomic = defaultdict(list)
+    psychro_refset = defaultdict(list)
+    psychro_trna = defaultdict(list)
+    def ending_freqs_of(c,freqs):
+        denom = sum([freqs[codon] for codon in codon_set])
+        return ([freqs[codon]/denom
+                 for codon in codon_set
+                 if codon.endswith(c)])
+    for org in orgs:
+        genomic_freqs = genomic_codon_freqs(org)
+        refset_freqs = refset_codon_freqs(org)
+        trna_freqs = trna_codon_freqs(org)
+        if "Pseudo" in org:
+            for c in "acgt":
+                pseudo_genomic[c].append(sum(ending_freqs_of(c,genomic_freqs)))
+                pseudo_refset[c].append(sum(ending_freqs_of(c,refset_freqs)))
+                pseudo_trna[c].append(sum(ending_freqs_of(c,trna_freqs)))
+        elif "Psychro" in org or "Acineto" in org:
+            for c in "acgt":
+                psychro_genomic[c].append(sum(ending_freqs_of(c,genomic_freqs)))
+                psychro_refset[c].append(sum(ending_freqs_of(c,refset_freqs)))
+                psychro_trna[c].append(sum(ending_freqs_of(c,trna_freqs)))
+    for c in "agct":
+        if testing:
+            print "pseudo refset vs. genomic %s ending:" %c, mannwhitneyu(pseudo_refset[c],
+                                                                     pseudo_genomic[c])[1]
+            print"psychro refset vs. genomic %s ending:" %c, mannwhitneyu(psychro_refset[c],
+                                                                      psychro_genomic[c])[1]
+    return (pseudo_genomic,pseudo_refset,pseudo_trna,
+            psychro_genomic,psychro_refset,psychro_trna)
+
+def n_ending_freqs(orgs,codon_set=four_box_codons):
+    genomic = defaultdict(list)
+    refset = defaultdict(list)
+    trna = defaultdict(list)
+    def ending_freqs_of(c,freqs):
+        denom = sum([freqs[codon] for codon in codon_set])
+        return ([freqs[codon]/denom
+                 for codon in codon_set
+                 if codon.endswith(c)])
+    for org in orgs:
+        genomic_freqs = genomic_codon_freqs(org)
+        refset_freqs = refset_codon_freqs(org)
+        trna_freqs = trna_codon_freqs(org)
+        for c in "acgt":
+            genomic[c].append(sum(ending_freqs_of(c,genomic_freqs)))
+            refset[c].append(sum(ending_freqs_of(c,refset_freqs)))
+            trna[c].append(sum(ending_freqs_of(c,trna_freqs)))
+    return (genomic,refset,trna)
+
+def summarize_pvp_barchart(barchart_results,filename,group1_name,group2_name):
+    (pseudo_genomic,pseudo_refset,pseudo_trna,
+            psychro_genomic,psychro_refset,psychro_trna) = barchart_results
+    data = [["VB" + c.upper(),aspect, mean(eval("pseudo_" + aspect)[c]),
+            se(eval("pseudo_" + aspect)[c]),mean(eval("psychro_" + aspect)[c]),
+            se(eval("psychro_" + aspect)[c])]
+            for c in "acgt"
+            for aspect in ["genomic","refset","trna"]]
+    data2csv(data,filename="boxes_analysis/" + filename,
+             header=["","",group1_name + " mean",group1_name + " se",group2_name + " mean",group2_name + " se"])
+    
+def cog_analysis():
+    pa_lts = named_ltds["Pseudomonas_aeruginosa"].values()
+    pa_cogs = map(cog.get_cog,pa_lts)
+    pvp_clique_cogs = [cog.get_cog(head(clique,lambda t:t.startswith("PA")))
+                       for clique in pvp_cliques]
+    #count pa_cogs
+    for c in cog.cogs:
+        print c, cog.cog_definitions[c], pa_cogs.count(c)
+
+def succ_diffs(w_seq):
+    ps = pairs(w_seq)
+    return sum(map(lambda(x,y): abs(x-y),ps))
+
+def succ_diff_perm_test(w_seq,n):
+    """Compare succ_diff statistic of w_seq against permutations of
+    w_seq, return proportion of control statistics lower than
+    succ_diffs(w_seq)"""
+    statistic = succ_diffs(w_seq)
+    length = len(w_seq)
+    controls = [succ_diffs(random.sample(w_seq,length)) for i in range(n)]
+    return len(filter(lambda control: control < statistic,controls))/float(n)
+    
+def w_sequence(cds,w_codons):
+    epsilon = 10**-10
+    cds = cds.lower()
+    codons = group_codons(cds)
+    if codons[-1] in ["tag","tga","taa"]:
+        codons = codons[:len(codons) - 1]
+    lookups = dictmap(w_codons,codons)
+    return lookups
+        
+def score_cds(cds,w_codons):
+    lookups = w_sequence(cds,w_codons)
+    log_lookups = map(lambda w:log(w + epsilon),lookups) 
+    nrca = exp(sum(log_lookups)/float(len(codons)))
+    return  nrca
+    
+def split_cds(cds,fraction):
+    cds_codons = group_codons(cds)
+    cut = int(floor(fraction * len(cds_codons)))
+    return ("".join(cds_codons[:cut]),"".join(cds_codons[cut:]))
+
+
+def sliding_windows(cds_codons,n):
+    """return a list containing sliding windows of length n"""
+    return ["".join(cds_codons[i:i+n]) for i in range(len(cds_codons)-n +1)]
+
+
+def sliding_score(cds,w_codons,frac=.1):
+    print "frac:",frac
+    cds_codons = group_codons(cds)
+    n = int(frac * len(cds_codons))
+    print "n:",n
+    windows = sliding_windows(cds_codons,n)
+    print "num_windows:",len(windows)
+    return map(lambda seq:score_cds(seq,w_codons),windows)
+
+def plot_sliding_windows(cds,w_codons,frac=.1):
+    scores = sliding_score(cds,w_codons,frac)
+    plt.plot(*zip(*[(3*i,score) for (i,score) in enumerate(scores)]))
+
+def control_sequence(genomic_freqs,length):
+    return "".join([sample(genomic_freqs.keys(),genomic_freqs.values())
+                    for i in range(length)])
+
+def control_score(genomic_freqs,ws,length):
+    return score_cds(control_sequence(genomic_freqs,length),ws)
+
+def generate_nrcas_vs_exps(orgs):
+    exps = exp_dicts(orgs)
+    nrcas = index_dicts(orgs,"nRCA")
+    for org in exps:
+        print org
+        data = [(tag,nrcas[org][tag],mean(exps[org][tag]))
+                for tag in exps[org] if tag in nrcas[org]]
+        data2csv(data,filename="nrca_vs_exp/" + "nrca_vs_exp_%s" % org,
+                 header = ["Locus tag","nRCA","exp"])
+
+org1 = "Pseudomonas_aeruginosa"
+org2 = "Psychrobacter_arcticus_273"
+def compare_ws_in_cliques(org1,org2):
+    """Are w-values conserved in orthologues?"""
+    genome1 = get_genome(org1)
+    genome2 = get_genome(org2)
+    ws1 = org2w_codons(org1)
+    ws2 = org2w_codons(org2)
+    cdss1 = get_cdss(genome1)
+    cdss2 = get_cdss(genome2)
+    orthologues = [(tup[0],tup[2]) for tup in pairwise_correlations(org1,org2)]
+    data = []
+    for i,orthologue in enumerate(orthologues[320:]):
+        gene1,gene2 = orthologue
+        cds1 = head(cdss1,lambda cds: gene1 in cds.qualifiers['locus_tag'])
+        seq1 = str(cds1.extract(genome1).seq)
+        w_seq1 = w_sequence(seq1,ws1)
+        protein1 = translate(seq1.lower())[1:]
+        cds2 = head(cdss2,lambda cds: gene2 in cds.qualifiers['locus_tag'])
+        seq2 = str(cds2.extract(genome2).seq)
+        w_seq2 = w_sequence(seq2,ws2)
+        protein2 = translate(seq2.lower())[1:]#remove ATG
+        if len(protein1) > 2000:
+            print "protein1:",len(protein1),"skipping"
+            continue
+        alignment = pairwise2.align.globalds(protein1,protein2,BLOSUM62,-7,-1)[0]
+        align1,align2 = alignment[:2]
+        w_seq1_cp = w_seq1[:]#copy for destructive pops
+        w_seq2_cp = w_seq2[:]
+        altered_align1 = [w_seq1_cp.pop(0) if a in string.ascii_uppercase else None
+                          for a in align1]
+        altered_align2 = [w_seq2_cp.pop(0) if a in string.ascii_uppercase else None
+                          for a in align2]
+        tuples = (filter(lambda tup: all(tup),
+                            zip(altered_align1,altered_align2)))
+        aligned_spearman = spearman(*transpose(tuples))
+        m = min(len(w_seq1),len(w_seq2))
+        raw_spearman = spearman(w_seq1[:m],w_seq2[:m])
+        # data.append(w_seq1)o
+        # data.append(w_seq2)
+        print i, aligned_spearman, raw_spearman, len(tuples),mean([len(w_seq1),len(w_seq2)])
+        del(seq1)
+        del(seq2)
+
+def welch_analysis():
+    """Welch et al. 2009 report that expression is better correlated
+    with codons whose tRNAs are preferentially charged during
+    starvation, within synthetic genes for a given protein.  """
+
+    #preliminaries:
+    exps = exp_dict(exp_path(ecoli))
+    exps = {k:mean(exps[k]) for k in exps}
+    cdss = cdss_from_org(ecoli)
+    genome = get_genome(ecoli)
+    coding_seqs = coding_sequences_dict(ecoli)
+    for locus_tag in coding_seqs:
+        if locus_tag in exps:
+            codons = group_codons(coding_seqs[locus_tag])
+            serine_codons = translation_table("S")
+            num_serine = len([c for c in codons if translate(c) == 'S'])
+            serine_codon_percents = {codon:len([c for c in codons
+                                          if c == codon])/float(num_serine+epsilon)
+                                     for codon in serine_codons}
+            
+            print locus_tag,serine_codon_percents["tct"],exps[locus_tag]
+            
+    #how does usage of codon GCA (Ala) vary with expression?
+    
+    
+main = False
+if main:
+    anno_dict = annotation_dict(all_orgs)
+    named_ltds = make_named_ltds(all_orgs)
+    lt2anno = locus_tag2anno_factory(anno_dict,named_ltds)
+    pvp_cliques = cliques_over(pvp_orgs)
+
+def refset_conservation(org1,org2):
+    """For each org, find the number of genes in that org's refset
+    which have orthologues in the other refset,divided by the total
+    number of refset genes with orthologues.  Return the max of the
+    two."""
+    pcs = pairwise_correlations(org1,org2)
+    refset1 = refset_tags(org1,"nRCA")
+    refset2 = refset_tags(org2,"nRCA")
+    refset1_to_genome2 = [lt1 for lt1 in refset1 if any(lt1 in pc for pc in pcs)]
+    refset1_to_refset2 = [lt1 for lt1 in refset1 if any((lt1 in pc and lt2 in pc)
+                                                        for pc in pcs
+                                                        for lt2 in refset2)]
+    refset2_to_genome1 = [lt2 for lt2 in refset2 if any(lt2 in pc for pc in pcs)]
+    refset2_to_refset1 = [lt2 for lt2 in refset2 if any((lt2 in pc and lt1 in pc)
+                                                        for pc in pcs
+                                                        for lt1 in refset1)]
+    r1r2 = len(refset1_to_refset2)
+    r1g2 = len(refset1_to_genome2)
+    r2r1 = len(refset2_to_refset1)
+    r2g1 = len(refset2_to_genome1)
+    ratio1 = r1r2/(r1g2 + epsilon)
+    ratio2 = r2r1/(r2g1 + epsilon)
+    ratio = max(ratio1,ratio2)
+    print org1,org2, r1r2,r1g2,ratio1,r2r1,r2g1,ratio2,ratio
+    
+def refset_conservation_exp(orgs):
+    for org1,org2 in choose2(orgs):
+        refset_conservation(org1,org2)
+
