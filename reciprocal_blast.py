@@ -653,7 +653,7 @@ def make_ribbon_graph(filename=None):
     pairwise_correlation_with_sliding_window for all pairs in
     last_orgs.  Color the plot according to whether pair belongs to
     same group or not."""
-    swss = [pairwise_correlation_with_binning(org1,org2)
+    swss = [pairwise_correlation_with_sliding_window(org1,org2)
             for org1,org2 in verbose_gen(choose2(last_orgs))]
     plotted_ingroup_yet = plotted_outgroup_yet = False
     for sws,(org1,org2) in zip(swss,choose2(last_orgs)):
