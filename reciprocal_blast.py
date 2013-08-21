@@ -107,13 +107,13 @@ from Bio.Blast import NCBIXML
 from Bio import SeqIO
 from Bio import Seq
 from Bio import pairwise2
-
 from orgs import *
 from utils import *
 from biochem import *
 import tai
 import cog
-
+from gnxp import master_exp_dict
+from scipy.stats import spearmanr,mannwhitneyu,wilcoxon
 from collections import Counter, defaultdict
 from string import Template
 from matplotlib import pyplot as plt
@@ -311,14 +311,6 @@ def locus_tag2org_inner(tag, named_ltds):
         if any(value.startswith(tag) for value in named_ltds[org].values()):
             return org
     raise Exception("Couldn't find locus tag %s" % tag)
-
-def get_genome_filename(org_name,ext):
-    dir_contents = os.listdir('data')
-    dir_name = os.path.join("data", 
-                            head(filter(lambda d: org_matches_dir(org_name, d), 
-                                        dir_contents)))
-    fn = head(filter(lambda f: f.endswith('.' + ext), os.listdir(dir_name)))
-    return os.path.join(dir_name, fn)
     
 def parse_results(filename, query_locus_dict, target_locus_dict):
     """Accept a file containing the results of blasting query_org against
@@ -437,10 +429,6 @@ def analyze_cliques(cliques, orgs, anno_dict, named_ltds):
         clique_dict[i] = [anno_dict[locus_tag2org(tag, named_ltds)][tag]
                           for tag in cl]
     return clique_dict
-
-
-def get_cdss(genome):
-    return ([feature for feature in genome.features if feature.type == 'CDS'])
 
 def cdss_from_org(org):
         return get_cdss(get_genome(org))
@@ -633,6 +621,16 @@ def pairwise_correlation_with_uniform_sampling(org1,org2):
     ys_resampled = rslice(ys,indices)
     return spearman(xs_resampled,ys_resampled)
 
+def control_pairwise_correlations(org1,org2):
+    """The purpose of this function is to provide a randomized control
+    for pairwise correlations: given pairwise_correlations(org1,org2),
+    return an equivalently sized control where scnRCA values are drawn
+    from U[0,1].  Note that because we are computing spearman
+    correlations, we needn't care about the underlying
+    distribution."""
+    n = len(pairwise_correlations(org1,org2))
+    return [("",random.random(),"",random.random()) for i in xrange(n)]
+    
 def pairwise_correlation_with_sliding_window(org1,org2):
     """The previous experiment
     (pairwise_correlation_with_uniform_sampling) actually exacerbated
@@ -641,44 +639,178 @@ def pairwise_correlation_with_sliding_window(org1,org2):
     separately over 10 bins and average them."""
     corrs = pairwise_correlations(org1,org2)
     xs,ys = transpose([(cor[1],cor[3]) for cor in corrs])
+    return correlation_with_sliding_window(xs,ys)
+
+def pairwise_correlation_with_sliding_window_with_pvalue(org1,org2,control=False):
+    """The previous experiment
+    (pairwise_correlation_with_uniform_sampling) actually exacerbated
+    the representation of ribosomal proteins (since ribosomals are
+    sparse in the range [.5,.7]).  Instead, we'll compute correlations
+    separately over 10 bins and average them."""
+    f = pairwise_correlations if not control else control_pairwise_correlations
+    corrs = f(org1,org2)
+    xs,ys = transpose([(cor[1],cor[3]) for cor in corrs])
+    return correlation_with_sliding_window_with_pvalue(xs,ys)
+
+# XXX change this function to get sliding window p-values
+def correlation_with_sliding_window(xs,ys):
     xmin,xmax = min(xs),max(xs)
     ymin,ymax = min(ys),max(ys)
-    n = len(corrs)
+    n = len(xs)
     js = sorted_indices(xs)
     return [spearman(rslice(xs,jth_bin),rslice(ys,jth_bin))
+            for jth_bin in sliding_window(js,n/2)]
+
+def correlation_with_sliding_window_with_pvalue(xs,ys):
+    xmin,xmax = min(xs),max(xs)
+    ymin,ymax = min(ys),max(ys)
+    n = len(xs)
+    js = sorted_indices(xs)
+    return [spearmanr(rslice(xs,jth_bin),rslice(ys,jth_bin))
             for jth_bin in sliding_window(js,n/2)]
 
 def make_ribbon_graph(filename=None):
     """Construct the 'ribbon graph' obtained by plotting the
     pairwise_correlation_with_sliding_window for all pairs in
-    last_orgs.  Color the plot according to whether pair belongs to
-    same group or not."""
-    swss = [pairwise_correlation_with_sliding_window(org1,org2)
-            for org1,org2 in verbose_gen(choose2(last_orgs))]
-    plotted_ingroup_yet = plotted_outgroup_yet = False
-    for sws,(org1,org2) in zip(swss,choose2(last_orgs)):
-        in_group = org_group(org1) == org_group(org2)
-        col = color='green' if in_group else 'red'
-        label = "In-group" if in_group else "Out-group"
+    last_orgs."""
+    all_sws = []
+    all_mps = []
+    all_ctrl_sws = []
+    all_ctrl_mps = []
+    ribbon_orgs = last_orgs[:]
+    swss_pss = [pairwise_correlation_with_sliding_window_with_pvalue(org1,org2,
+                                                                     control=False)
+                for org1,org2 in verbose_gen(choose2(ribbon_orgs))]
+    control_swss_pss = [pairwise_correlation_with_sliding_window_with_pvalue(org1,org2,
+                                                                             control=True)
+                        for org1,org2 in verbose_gen(choose2(ribbon_orgs))]
+    exp_label = True # sentinel variables for plot legend
+    ctrl_label = True
+    plt.close()
+    for sws_ps,control_sws_ps in zip(swss_pss,control_swss_pss):
+        reject_col = 'blue'
+        fail_to_reject_col = 'red'
+        control_col = 'green'
+        sws,ps = transpose(sws_ps)
+        control_sws,control_ps = transpose(control_sws_ps)
         midpoints = [i/(2*float(len(sws))) + 0.25
                         for (i,v) in enumerate(sws)]
-        if in_group and not plotted_ingroup_yet:
-            plt.plot(midpoints,sws,color=col,label=label)
-            plotted_ingroup_yet = True
-        elif not in_group and not plotted_outgroup_yet:
-            plt.plot(midpoints,sws,color=col,label=label)
-            plotted_outgroup_yet = True
-        else:
-            plt.plot(midpoints,sws,color=col)
+        control_midpoints = [i/(2*float(len(control_sws))) + 0.25
+                             for (i,v) in enumerate(control_sws)]
+        ctrl_label = "Control" if ctrl_label else None
+        plt.scatter(control_midpoints,control_sws,s=0.1,color='gray',label=ctrl_label)
+        ctrl_label = False
+        all_sws.extend(sws)
+        all_mps.extend(midpoints)
+        all_ctrl_sws.extend(control_sws)
+        all_ctrl_mps.extend(control_midpoints)
+    #for midpoints,sws in zip(all_mps,all_sws):
+    exp_label = "Experimental" if exp_label else None
+    plt.scatter(all_mps,all_sws,color='blue',s=1,label=exp_label)
+    exp_label = False
+    for decile in pairs(myrange(0.25,0.75+0.05,.05)):
+        start,stop = decile
+        rhos = [rho for rho,mp in zip(all_sws,all_mps) if start <= mp < stop]
+        ctrl_rhos = [rho for rho,mp in zip(all_ctrl_sws,all_ctrl_mps)
+                     if start <= mp < stop]
+        print decile,len(rhos),len(ctrl_rhos),wilcoxon(rhos,ctrl_rhos)
     plt.xlabel("Midpoint Percentile")
     plt.ylabel(r"Spearman $\rho$")
-    plt.legend(loc=0)
+    plt.legend(loc='upper left')
     plt.title("Sliding Window Spearman Correlation")
     if filename:
         plt.savefig(filename,dpi=400)
+        plt.close()
         
-    
-    
+def make_exp_nrca_ribbon_graph(filename=None):
+    """
+    Construct ribbon graph as above, but for nrca vs exp, and for
+    validation orgs
+    """
+    nrcas = index_dicts(validation_orgs,"nRCA")
+    all_sws = []
+    all_mps = []
+    all_ctrl_sws = []
+    all_ctrl_mps = []
+    ctrl_label = exp_label = True
+    plt.close()
+    for org in verbose_gen(validation_orgs):
+        print org
+        org_nrcas = nrcas[org]
+        org_exps = master_exp_dict[org]
+        correlates = [(org_nrcas[k],mean(org_exps[k])) for k in org_exps
+                      if k in org_nrcas]
+        control_correlates = [(random.random(),random.random()) for _ in correlates]
+        if not correlates:
+            print "failed on:",org
+            continue
+        xs,ys = transpose(correlates)
+        control_xs,control_ys = transpose(control_correlates)
+        sws = correlation_with_sliding_window(xs,ys)
+        control_sws = correlation_with_sliding_window(control_xs,control_ys)
+        assert len(set(sws)) > 1,org
+        midpoints = [i/(2*float(len(sws))) + 0.25
+                        for (i,v) in enumerate(sws)]
+        control_midpoints = [i/(2*float(len(control_sws))) + 0.25
+                             for (i,v) in enumerate(control_sws)]
+        ctrl_label = "Control" if ctrl_label else None
+        plt.scatter(control_midpoints,control_sws,color='grey',label=ctrl_label,s=0.1)
+        ctrl_label = False
+        all_sws.extend(sws)
+        all_mps.extend(midpoints)
+        all_ctrl_sws.extend(control_sws)
+        all_ctrl_mps.extend(control_midpoints)
+    for midpoints,sws in zip(all_mps,all_sws):
+        exp_label = "Experimental" if exp_label else None
+        plt.scatter(midpoints,sws,color='blue',s=1,label=exp_label)
+        exp_label = False
+    for decile in pairs(myrange(0.25,0.75+0.05,.05)):
+        start,stop = decile
+        rhos = [rho for rho,mp in zip(all_sws,all_mps) if start <= mp < stop]
+        ctrl_rhos = [rho for rho,mp in zip(all_ctrl_sws,all_ctrl_mps)
+                     if start <= mp < stop]
+        print decile,len(rhos),len(ctrl_rhos),wilcoxon(rhos,ctrl_rhos)
+            
+    plt.xlabel("Midpoint Percentile")
+    plt.ylabel(r"Spearman $\rho$")
+    plt.legend(loc='upper left')
+    plt.title("Sliding Window Spearman Correlation (scnRCA vs. Expression)")
+    if filename:
+        plt.savefig(filename,dpi=400)
+        plt.close()
+    return all_sws,all_mps,all_ctrl_sws,all_ctrl_mps
+
+def make_exp_nrca_ribbon_graph_pvalues(filename=None):
+    """
+    Construct ribbon graph as above, but for nrca vs exp, and for
+    validation orgs
+    """
+    nrcas = index_dicts(validation_orgs,"nRCA")
+    all_sws = []
+    all_mps = []
+    all_ctrl_sws = []
+    all_ctrl_mps = []
+    ctrl_label = exp_label = True
+    plt.close()
+    all_swss = []
+    for org in verbose_gen(validation_orgs):
+        print org
+        org_nrcas = nrcas[org]
+        org_exps = master_exp_dict[org]
+        correlates = [(org_nrcas[k],mean(org_exps[k])) for k in org_exps
+                      if k in org_nrcas]
+        if not correlates:
+            print "failed on:",org
+            continue
+        xs,ys = transpose(correlates)
+        sws = correlation_with_sliding_window_with_pvalue(xs,ys)
+        all_swss.append(sws)
+    return all_swss
+            
+def write_exp_nrca_ribbon_graph_pvalue_table():
+    all_swss = make_exp_nrca_ribbon_graph_pvalues()
+    data2csv([validation_orgs,["rho","pvalue"]*len(validation_orgs)] +
+             transpose(all_swss),filename="exp_nrca_correlations_and_pvalues.csv")
     
 def exp_filename(org):
     return os.path.join("exp_csvs", org+"_exp.csv")
@@ -1588,16 +1720,41 @@ def generate_all_full_clique_csvs():
         cliques,_ = compute_cliques(eval(group_name),anno_dict,named_ltds)
         data2csv(map(sorted,cliques),filename="clique_csvs_"+group_name + "_full_cliques.csv")
 
-# def ribosomal_cliques(orgs,anno_dict,named_ltds):
-#     cliques,clique_dict = compute_cliques(orgs,anno_dict,named_ltds)
-#     header_clique = head(cliques,lambda clique:len(clique)==len(orgs))
-#     sorted_orgs = [locus_tag2org(tag,named_ltds) for tag in sorted(header_clique)]
-#     return ([sorted_orgs] +
-#             [[indices[locus_tag2org(tag,named_ltds)][tag] for tag in clique]
-#              for clique in [clique for i,clique in enumerate(cliques)
-#                             if any(("ribosomal" in term
-#                                     for term in clique_dict[i]))]])
+def ribosomal_cliques(orgs,anno_dict,named_ltds,index="nRCA"):
+    cliques,clique_dict = compute_cliques(orgs,anno_dict,named_ltds)
+    header_clique = head(cliques,lambda clique:len(clique)==len(orgs))
+    sorted_orgs = [locus_tag2org(tag,named_ltds) for tag in sorted(header_clique)]
+    indices = index_dicts(orgs,index)
+    r_cliques = [clique for i,clique in enumerate(cliques)
+                 if any(("ribosomal" in term
+                         for term in clique_dict[i]))]
+    annotations = [[anno_dict[locus_tag2org(tag,named_ltds)][tag]
+                    for tag in clique]
+                   for clique in r_cliques]
+    return annotations,([sorted_orgs] +
+                      [[indices[locus_tag2org(tag,named_ltds)][tag] for tag in clique]
+                       for clique in r_cliques])
 
+def partial_order_dict_from_clique_values(clique_values):
+    """Generate a partial order from clique values"""
+    dominance_dict = {(i,j):mean([c1 > c2 for (c1,c2) in zip(clique1,clique2)])
+                      for ((i,clique1),(j,clique2)) in
+                      choose2(list(enumerate(clique_values)))}
+    dominance_dict_forward =  {(i,j):p for ((i,j),p) in dominance_dict.items()
+                               if p >= .5}
+    dominance_dict_backward = {(j,i):(1-p) for ((i,j),p) in dominance_dict.items()
+                               if p < .5}
+    dominance_dict_flipped = dict(dominance_dict_forward.items() +
+                                  dominance_dict_backward.items())
+    return dominance_dict_flipped
+
+def graph_partial_order_dict(partial_order_dict,cutoff=0):
+    def filter_dict(d,cutoff):
+        return {k:v for k,v in d.items() if v > cutoff}
+    g = nx.DiGraph(filter_dict(partial_order_dict,cutoff).keys())
+    pos = nx.graphviz_layout(g,prog='dot')
+    nx.draw(g,pos)
+    
 def generate_ribosomal_clique_csvs():
     for group_name in group_names:
          filename = "clique_csvs/%s_ribosomals.csv" % group_name

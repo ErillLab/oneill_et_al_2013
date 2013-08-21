@@ -88,7 +88,6 @@ def variance(xs):
     return mean([x**2 for x in xs]) - mean(xs)**2
 
 def sd(xs):
-    print xs
     if xs:
         return sqrt(mean([x**2 for x in xs]) - mean(xs)**2)
     else:
@@ -281,3 +280,43 @@ def sliding_window(seq,w,verbose=False):
                 print i
         yield seq[i:i+w]
         i += 1
+
+def order_is_transitive_ref(edges):
+    """
+    Given an order represented as a list of edges between nodes
+    represented as integers, determine whether the order is
+    transitive.  That is,
+
+    for all a,b,c in V(P), if (a,b) in P and (b,c) in P then (a,c) in
+    P as well.
+    """
+    vertices = list(set(concat(map(list,edges))))
+    tests = [(a,c) in edges
+             for a in vertices
+             for b in vertices
+             for c in vertices
+             if (a,b) in edges and (b,c) in edges]
+    return mean(tests)
+
+def order_is_transitive(edges):
+    vertices = list(set(concat(map(list,edges))))
+    tests = [(a,c) in edges
+             for (a,i) in edges
+             for (j,c) in edges
+             if i == j]
+    return mean(tests)
+
+def myrange(start,stop,step):
+    return map(lambda x: start + x*step,
+               range(int((stop-start)/step)))
+
+def get_genome_filename(org_name,ext):
+    dir_contents = os.listdir('data')
+    dir_name = os.path.join("data", 
+                            head(filter(lambda d: org_matches_dir(org_name, d), 
+                                        dir_contents)))
+    fn = head(filter(lambda f: f.endswith('.' + ext), os.listdir(dir_name)))
+    return os.path.join(dir_name, fn)
+
+def get_cdss(genome):
+    return ([feature for feature in genome.features if feature.type == 'CDS'])

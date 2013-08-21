@@ -97,7 +97,9 @@ validation_orgs = ['Thermotoga_maritima_MSB8',
                    'Ralstonia_solanacearum_GMI1000',
                    'Chlamydophila_pneumoniae_AR39',
                    'Caulobacter_crescentus_CB15',
-                   'Myxococcus_xanthus_DK_1622']
+                   'Myxococcus_xanthus_DK_1622',
+                   'Escherichia_coli',
+                   'Mycobacterium_smegmatis']
 
 
 
